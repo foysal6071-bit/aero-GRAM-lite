@@ -41,7 +41,10 @@ jobs:
         run: |
           test -f AeroGram-Calls-Fork/scripts/patch_telegram.py || { echo "patch_telegram.py nai!"; exit 1; }
           python3 AeroGram-Calls-Fork/scripts/patch_telegram.py 2>&1 | tee patch.log
-          test "${PIPESTATUS[0]}" = 0 || { echo "PATCH FAILED"; exit 1; }
+          if [ "${PIPESTATUS[0]}" != 0 ]; then
+            grep -E "FAIL|Traceback|Error" patch.log | head -5 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          fi
           grep -q "PATCH DONE" patch.log || { echo "PATCH did not finish"; exit 1; }
           test -f Telegram/TMessagesProj/src/main/java/org/telegram/ui/AeroDrawer.java || { echo "Aero files NOT copied"; exit 1; }
 
