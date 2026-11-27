@@ -1,0 +1,127 @@
+name: Build 我的爱 (AeroGram, full features)
+
+on:
+  workflow_dispatch:
+    inputs:
+      abi:
+        description: "CPU type (32-bit phone = armeabi-v7a)"
+        required: true
+        default: armeabi-v7a
+        type: choice
+        options: [armeabi-v7a, arm64-v8a, "arm64-v8a,armeabi-v7a", "arm64-v8a,armeabi-v7a,x86,x86_64"]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      # push = 32-bit (armeabi-v7a). Manual run: pick from the dropdown.
+      ABIS: ${{ inputs.abi || 'armeabi-v7a' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Clone Telegram Android source
+        run: git clone --depth 1 --recursive --shallow-submodules https://github.com/DrKLO/Telegram.git Telegram
+
+      # Full AeroGram patch: icon, name, typing animation, wallpapers, notification types,
+      # floating video call, permissions, size optimizations ... (scripts/patch_telegram.py + scripts/aero/*)
+      - name: Patch (full AeroGram)
+        env:
+          VARIANT: video
+          APP_ID: ${{ secrets.TG_API_ID }}
+          APP_HASH: ${{ secrets.TG_API_HASH }}
+          APP_NAME: "我的爱"
+        run: |
+          test -f scripts/patch_telegram.py || { echo "scripts/patch_telegram.py nai! Zip-er shob file (scripts folder shoho) repo-te upload korun."; exit 1; }
+          python3 scripts/patch_telegram.py
+
+      - name: Optional google-services.json (push notification)
+        env:
+          GS: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ -n "$GS" ]; then echo "$GS" > Telegram/TMessagesProj_AppStandalone/google-services.json; echo added; else echo skipped; fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # ubuntu-24.04 runner-e Android SDK already ache
+      - name: Install SDK / NDK
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SM" ] || SM="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)"
+          echo "sdkmanager: $SM"
+          java -version
+          set +o pipefail
+          yes | "$SM" --licenses > /dev/null || true
+          "$SM" --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+      - name: Build APK
+        working-directory: Telegram
+        env:
+          GRADLE_OPTS: -Dorg.gradle.internal.http.connectionTimeout=180000 -Dorg.gradle.internal.http.socketTimeout=180000 -Dorg.gradle.internal.repository.max.retries=10 -Dorg.gradle.internal.repository.initial.backoff=2000
+        run: |
+          chmod +x gradlew
+          for i in 1 2 3; do
+            echo "=== Gradle attempt $i ==="
+            EXTRA=""; [ "$i" -gt 1 ] && EXTRA="--refresh-dependencies"
+            if ./gradlew --no-daemon --max-workers=2 $EXTRA :TMessagesProj_AppStandalone:assembleAfatStandalone; then
+              ok=1; break
+            fi
+            echo "Attempt $i failed, 30s por abar chesta..."; sleep 30
+          done
+          [ "${ok:-0}" = 1 ] || exit 1
+
+      - name: ABI check
+        run: |
+          APK="$(find Telegram/TMessagesProj_AppStandalone/build/outputs/apk -name '*.apk' -print -quit)"
+          test -n "$APK" || { echo "APK not found"; exit 1; }
+          echo "ABIS = $ABIS. Native library folders inside the APK:"
+          unzip -l "$APK" | grep -o 'lib/[^/]*/' | sort -u
+          ls -lh "$APK"
+
+      - name: Sign APK
+        env:
+          KS_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          APK="$(find Telegram/TMessagesProj_AppStandalone/build/outputs/apk -name '*.apk' -print -quit)"
+          test -n "$APK" || { echo "APK not found"; exit 1; }
+          # recompress with Zopfli (a few % smaller); fall back to the plain APK if it fails
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f -z -p 4 "$APK" aligned.apk && APK=aligned.apk || echo "zipalign -z failed, using plain APK"
+          if [ -n "$KS_B64" ]; then
+            echo "$KS_B64" | base64 -d > ks.jks; PASS="$KS_PASS"; ALIAS="$KS_ALIAS"
+          else
+            PASS=aerogram123; ALIAS=aero
+            keytool -genkeypair -keystore ks.jks -storepass $PASS -keypass $PASS -alias $ALIAS -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=AeroGram"
+          fi
+          OUT="AeroGram-$(echo "$ABIS" | tr ',' '-').apk"
+          echo "OUT_APK=$OUT" >> "$GITHUB_ENV"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign --ks ks.jks --ks-pass pass:$PASS --ks-key-alias $ALIAS --key-pass pass:$PASS --out "$OUT" "$APK"
+          ls -lh "$OUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: aerogram-${{ github.run_number }}
+          name: 我的爱 #${{ github.run_number }} (${{ env.ABIS }})
+          body: Unofficial third-party client based on Telegram for Android (GPLv2). CPU type ${{ env.ABIS }}.
+          files: ${{ env.OUT_APK }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
