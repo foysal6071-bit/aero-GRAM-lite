@@ -20,7 +20,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     env:
-      # push = 32-bit (armeabi-v7a). Manual run: pick from the dropdown.
       ABIS: ${{ inputs.abi || 'armeabi-v7a' }}
     steps:
       - uses: actions/checkout@v4
@@ -33,8 +32,6 @@ jobs:
       - name: Clone Telegram Android source
         run: git clone --depth 1 --recursive --shallow-submodules https://github.com/DrKLO/Telegram.git Telegram
 
-      # Full AeroGram patch: icon, name, typing animation, wallpapers, notification types,
-      # floating video call, permissions, size optimizations ... (scripts/patch_telegram.py + scripts/aero/*)
       - name: Patch (full AeroGram)
         env:
           VARIANT: video
@@ -42,8 +39,11 @@ jobs:
           APP_HASH: ${{ secrets.TG_API_HASH }}
           APP_NAME: "我的爱"
         run: |
-          test -f AeroGram-Calls-Fork/scripts/patch_telegram.py || { echo "AeroGram-Calls-Fork/scripts/patch_telegram.py nai! Folder ta repo-r root-e upload korun."; exit 1; }
-          python3 AeroGram-Calls-Fork/scripts/patch_telegram.py
+          test -f AeroGram-Calls-Fork/scripts/patch_telegram.py || { echo "patch_telegram.py nai!"; exit 1; }
+          python3 AeroGram-Calls-Fork/scripts/patch_telegram.py 2>&1 | tee patch.log
+          test "${PIPESTATUS[0]}" = 0 || { echo "PATCH FAILED"; exit 1; }
+          grep -q "PATCH DONE" patch.log || { echo "PATCH did not finish"; exit 1; }
+          test -f Telegram/TMessagesProj/src/main/java/org/telegram/ui/AeroDrawer.java || { echo "Aero files NOT copied"; exit 1; }
 
       - name: Optional google-services.json (push notification)
         env:
@@ -56,14 +56,12 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # ubuntu-24.04 runner-e Android SDK already ache
       - name: Install SDK / NDK
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           [ -x "$SM" ] || SM="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)"
-          echo "sdkmanager: $SM"
           java -version
           set +o pipefail
           yes | "$SM" --licenses > /dev/null || true
@@ -91,9 +89,14 @@ jobs:
         run: |
           APK="$(find Telegram/TMessagesProj_AppStandalone/build/outputs/apk -name '*.apk' -print -quit)"
           test -n "$APK" || { echo "APK not found"; exit 1; }
-          echo "ABIS = $ABIS. Native library folders inside the APK:"
           unzip -l "$APK" | grep -o 'lib/[^/]*/' | sort -u
           ls -lh "$APK"
+
+      - name: Verify AeroGram UI is inside the APK
+        run: |
+          APK="$(find Telegram/TMessagesProj_AppStandalone/build/outputs/apk -name '*.apk' -print -quit)"
+          rm -rf dx && mkdir dx && unzip -q -o "$APK" 'classes*.dex' -d dx
+          grep -l "AeroDrawer" dx/*.dex || { echo "FAIL: plain Telegram APK (Aero code missing)"; exit 1; }
 
       - name: Sign APK
         env:
@@ -103,7 +106,6 @@ jobs:
         run: |
           APK="$(find Telegram/TMessagesProj_AppStandalone/build/outputs/apk -name '*.apk' -print -quit)"
           test -n "$APK" || { echo "APK not found"; exit 1; }
-          # recompress with Zopfli (a few % smaller); fall back to the plain APK if it fails
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -f -z -p 4 "$APK" aligned.apk && APK=aligned.apk || echo "zipalign -z failed, using plain APK"
           if [ -n "$KS_B64" ]; then
             echo "$KS_B64" | base64 -d > ks.jks; PASS="$KS_PASS"; ALIAS="$KS_ALIAS"
