@@ -53,6 +53,19 @@ jobs:
           GS: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
           if [ -n "$GS" ]; then echo "$GS" > Telegram/TMessagesProj_AppStandalone/google-services.json; echo added; else echo skipped; fi
+          # google-services.json-er package name amader app-er sathe milate hobe (nahole build fail hoy)
+          F=Telegram/TMessagesProj_AppStandalone/google-services.json
+          if [ -f "$F" ]; then
+            python3 - "$F" << 'PY'
+          import json, sys
+          f = sys.argv[1]
+          d = json.load(open(f, encoding="utf-8"))
+          for c in d.get("client", []):
+              c["client_info"]["android_client_info"]["package_name"] = "org.aerogram.video.web"
+          json.dump(d, open(f, "w", encoding="utf-8"), indent=2)
+          print("google-services.json package_name -> org.aerogram.video.web")
+          PY
+          fi
 
       - uses: actions/setup-java@v4
         with:
